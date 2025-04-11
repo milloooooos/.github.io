@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>药学服务卡搜索系统</title>
+    <style>
+        /* 全局样式 */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+        }
+
+        body {
+            background-color: #f8f9fa;
+            color: #333;
+            line-height: 1.6;
+        }
+
+        /* 容器样式 */
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 20px;
+        }
+
+        /* 标题样式 */
+        header {
+            text-align: center;
+            background: linear-gradient(135deg, #3498db, #2c3e50);
+            color: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            padding: 30px;
+        }
+
+        header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+
+        header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+
+        /* 搜索区域样式 */
+        .search-section {
+            background-color: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+            display: flex;
+            justify-content: center;
+        }
+
+        .search-box {
+            display: flex;
+            width: 80%;
+        }
+
+        .search-input {
+            flex: 1;
+            padding: 15px 20px;
+            font-size: 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 30px 0 0 30px;
+            outline: none;
+            transition: border-color 0.3s;
+        }
+
+        .search-input:focus {
+            border-color: #3498db;
+        }
+
+        .search-button {
+            padding: 15px 25px;
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 0 30px 30px 0;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+
+        .search-button:hover {
+            background-color: #2980b9;
+        }
+
+        /* 结果展示区域样式 */
+        .results-section {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+        }
+
+        .card {
+            background-color: white;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            position: relative;
+        }
+
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
+        }
+
+        .card-header {
+            padding: 20px;
+            background: linear-gradient(135deg, #3498db, #2c3e50);
+            color: white;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .card-title {
+            font-size: 1.2rem;
+            margin-bottom: 5px;
+            font-weight: 600;
+        }
+
+        .card-subtitle {
+            font-size: 0.9rem;
+            opacity: 0.9;
+        }
+
+        .card-body {
+            padding: 20px;
+        }
+
+        .card-content {
+            margin-bottom: 15px;
+        }
+
+        .card-content p {
+            margin-bottom: 10px;
+            font-size: 14px;
+            color: #666;
+        }
+
+        .card-footer {
+            padding: 15px 20px;
+            background-color: #f8f9fa;
+            text-align: center;
+            border-top: 1px solid #e9ecef;
+        }
+
+        .view-more {
+            display: inline-block;
+            padding: 8px 16px;
+            background-color: #3498db;
+            color: white;
+            border-radius: 20px;
+            text-decoration: none;
+            font-size: 14px;
+            transition: background-color 0.3s;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .view-more:hover {
+            background-color: #2980b9;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+        }
+
+        /* 无结果提示样式 */
+        .no-results {
+            grid-column: 1 / -1;
+            text-align: center;
+            padding: 40px;
+            background-color: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+        }
+
+        .no-results h3 {
+            font-size: 1.5rem;
+            margin-bottom: 15px;
+            color: #2c3e50;
+        }
+
+        .no-results p {
+            color: #7f8c8d;
+            font-size: 1rem;
+        }
+
+        /* 模态框样式 */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            background-color: rgba(0, 0, 0, 0.4);
+        }
+
+        .modal-content {
+            background-color: #fefefe;
+            margin: 5% auto;
+            padding: 30px;
+            border: 1px solid #888;
+            width: 80%;
+            max-width: 800px;
+            position: relative;
+            border-radius: 10px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 20px;
+        }
+
+        .close {
+            color: #aaa;
+            float: right;
+            font-size: 28px;
+            font-weight: bold;
+            transition: color 0.3s;
+        }
+
+        .close:hover,
+        .close:focus {
+            color: black;
+            text-decoration: none;
+            cursor: pointer;
+        }
+
+        .modal-title {
+            font-size: 1.8rem;
+            color: #2c3e50;
+            margin-bottom: 10px;
+        }
+
+        .modal-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .tag {
+            display: inline-block;
+            background-color: #e0f7fa;
+            color: #0097a7;
+            border-radius: 20px;
+            padding: 5px 10px;
+            font-size: 12px;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+        }
+
+        .summary-card {
+            background-color: #f0f7fd;
+            border: 1px solid #b3d7ff;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+
+        .summary-card h3 {
+            font-size: 1.2rem;
+            color: #3498db;
+            margin-bottom: 10px;
+        }
+
+        .modal-details {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+        }
+
+        .modal-details p {
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+
+        .modal-details strong {
+            color: #3498db;
+        }
+
+        @media (max-width: 768px) {
+            .modal-details {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>药学服务卡搜索系统</h1>
+            <p>快速查找药品信息，获取专业药学建议</p>
+        </header>
+        <section class="search-section">
+            <div class="search-box">
+                <input type="text" id="search-input" class="search-input" placeholder="输入药品名称、适应症或关键词...">
+                <button class="search-button" onclick="search()">搜索</button>
+            </div>
+        </section>
+        <section class="results-section" id="results-container">
+            <!-- 搜索结果动态填充 -->
+        </section>
+    </div>
+
+    <!-- 模态框结构 -->
+    <div id="modal" class="modal">
+        <div class="modal-content">
+            <span class="close">&times;</span>
+            <h2 class="modal-title" id="modal-title"></h2>
+            <div class="modal-tags" id="tags"></div>
+            <div class="summary-card" id="summary-card">
+                <h3>注意事项小结</h3>
+                <p id="summary-text"></p>
+            </div>
+            <div class="modal-details" id="modal-details"></div>
+        </div>
+    </div>
+
+    <script>
+        const pharmacyCards = [
+            {
+                "药品名称": "帕妥珠单抗",
+                "通用名": "帕妥珠单抗注射液",
+                "药品规格": "420mg(14ml)/瓶/盒；西林瓶装，1 瓶/盒。",
+                "储存条件": "冷藏（2℃~8℃），避光，不冷冻、不振摇。",
+                "用法用量": "医生指导下静脉输注，首次给药至少持续60分钟，后续至少30分钟。输注时间控制：首次60分钟，后续30~60分钟。延迟或遗漏：两次输注间隔＜6周尽早补注，≥6周重新给予负荷剂量。",
+                "特殊人群用药": "妊娠期：潜在获益大于胎儿风险时使用。哺乳期：尚不明确，建议停止母乳。",
+                "常见不良反应及处理方法": "恶心、腹泻、呕吐：调整饮食，口服补液盐。消化系统不适：蒙脱石散、洛哌丁胺。皮肤系统：脱发暂时性，不必焦虑。血液系统：中性粒细胞减少症，密切关注血常规。",
+                "药学服务": "医保药品：60~80%。商保报销：平安商保等。援助项目：无。配送服务：提供。输注服务：成都等地区。",
+                "药师建议": "营养支持：高蛋白、维生素。器械支持：监测设备。生活护理：饮食管理、休息与睡眠。"
+            },
+            {
+                "药品名称": "曲妥珠单抗",
+                "通用名": "曲妥珠单抗注射液",
+                "药品规格": "静脉注射用：440mg(20ml)/瓶；皮下注射用：600mg（5ml）/瓶。",
+                "储存条件": "冷藏（2℃~8℃），避光，不冷冻、不振摇。",
+                "用法用量": "医生指导下静脉输注，首次给药至少持续60分钟，后续至少30分钟。输注时间控制：首次90分钟以上，后续30分钟。延迟或遗漏：＜1周尽早补注，≥1周重新给予负荷剂量。",
+                "特殊人群用药": "妊娠期：潜在获益大于胎儿风险时使用。哺乳期：尚不明确，建议停止母乳。",
+                "常见不良反应及处理方法": "恶心、腹泻、呕吐：调整饮食，口服补液盐。消化系统不适：蒙脱石散、洛哌丁胺。全身性疾病：输注反应，减慢输注速度或暂停。血液系统：中性粒细胞减少症，G-CSF。",
+                "药学服务": "医保药品：60~80%。商保报销：平安商保等。援助项目：无。配送服务：提供。输注服务：成都等地区。",
+                "药师建议": "营养支持：高蛋白、维生素。器械支持：监测设备。生活护理：饮食管理、休息与睡眠。"
+            },
+            {
+                "药品名称": "萨特利珠单抗",
+                "通用名": "萨特利珠单抗注射液",
+                "药品规格": "120mg(1ml)/支，预充式注射器（PFS）1 支/盒。",
+                "储存条件": "冷藏（2℃~8℃），避光，不冷冻。运输中冷藏储存。",
+                "用法用量": "使用前室温放置30分钟，检查溶液状态。医生指导下皮下注射，腹部或大腿处，轮换注射部位。延迟或遗漏：维持期＜8周尽快补注，≥8周重置给药时间表。",
+                "特殊人群用药": "妊娠期：潜在获益大于胎儿风险时使用。哺乳期：尚不明确，建议停止母乳。",
+                "常见不良反应及处理方法": "消化系统：恶心、腹泻，调整饮食，口服补液盐。皮肤系统：皮疹，温和护肤品，中弱效糖皮质激素软膏。全身性疾病：关节痛、四肢疼痛，非甾体抗炎药。呼吸系统：上呼吸道感染，多喝水。",
+                "药学服务": "医保药品：60~80%。商保报销：德阳德 e 保。援助项目：无。配送服务：提供。输注服务：成都等地区。",
+                "药师建议": "营养支持：均衡饮食。器械支持：眼部热敷仪。生活护理：饮食管理、休息与睡眠。"
+            },
+            {
+                "药品名称": "特立妥单抗",
+                "通用名": "特立妥单抗注射液",
+                "药品规格": "30 mg（3.0ml）/瓶，153 mg（1.7ml）/瓶。",
+                "储存条件": "冷藏（2°C~8°C），避光，不冷冻，避免摇晃。",
+                "用法用量": "医务人员在复苏设施条件下给药，预处理：皮质类固醇、退热剂、抗组胺药。常用剂量：0.06 mg/kg和0.3 mg/kg递增，继以1.5 mg/kg每周一次。延迟或遗漏：及时就医。",
+                "特殊人群用药": "妊娠期：不建议，除非获益大于风险。哺乳期：治疗期间及末次给药后5个月内不建议哺乳。",
+                "常见不良反应及处理方法": "免疫系统：低丙种球蛋白血症，细胞因子释放综合征，定期监测免疫球蛋白。感染及侵染：上呼吸道感染，鼻部热敷，退烧药。血液及淋巴系统：贫血，补充铁剂。",
+                "药学服务": "医保药品：自费。商保报销：无。援助项目：上海云健康益药药业。配送服务：提供。输注服务：成都等地区。",
+                "药师建议": "营养支持：高能量密度食物。器械支持：监测设备。生活护理：饮食管理、休息与睡眠。"
+            }
+        ];
+
+        window.onload = function () {
+            displayCards(pharmacyCards);
+        };
+
+        function search() {
+            const searchTerm = document.getElementById('search-input').value.toLowerCase();
+            let filteredCards = [...pharmacyCards];
+            if (searchTerm) {
+                filteredCards = filteredCards.filter(card => {
+                    return Object.values(card).some(value =>
+                        value.toString().toLowerCase().includes(searchTerm)
+                    );
+                });
+            }
+            displayCards(filteredCards);
+        }
+
+        function displayCards(cards) {
+            const container = document.getElementById('results-container');
+            container.innerHTML = '';
+            if (cards.length === 0) {
+                container.innerHTML = `
+                    <div class="no-results">
+                        <h3>没有找到匹配的结果</h3>
+                        <p>请尝试其他关键词</p>
+                    </div>
+                `;
+                return;
+            }
+            cards.forEach(card => {
+                const cardElement = document.createElement('div');
+                cardElement.className = 'card';
+
+                cardElement.innerHTML = `
+                    <div class="card-header">
+                        <h3 class="card-title">${card["药品名称"]}</h3>
+                        <div class="card-subtitle">${card["通用名"]}</div>
+                    </div>
+                    <div class="card-body">
+                        <div class="card-content">
+                            <p><strong>用法用量：</strong>${card["用法用量"].split('。')[0]}...</p>
+                            <p><strong>常见不良反应：</strong>${card["常见不良反应及处理方法"].split('。')[0]}...</p>
+                            <p><strong>药学服务：</strong>${card["药学服务"].split('。')[0]}...</p>
+                            <p><strong>药师建议：</strong>${card["药师建议"].split('。')[0]}...</p>
+                        </div>
+                    </div>
+                    <div class="card-footer">
+                        <a href="#" class="view-more">查看详情</a>
+                    </div>
+                `;
+
+                const viewMoreButton = cardElement.querySelector('.view-more');
+                viewMoreButton.addEventListener('click', function (event) {
+                    event.preventDefault();
+                    viewMoreDetails(card);
+                });
+
+                container.appendChild(cardElement);
+            });
+        }
+
+        function viewMoreDetails(card) {
+            const modal = document.getElementById('modal');
+            const span = document.getElementsByClassName("close")[0];
+            const title = document.getElementById('modal-title');
+            const details = document.getElementById('modal-details');
+            const tags = document.getElementById('tags');
+            const summaryCard = document.getElementById('summary-card');
+            const summaryText = document.getElementById('summary-text');
+
+            title.textContent = `药品详细信息 - ${card["药品名称"]}`;
+            details.innerHTML = '';
+            tags.innerHTML = '';
+            summaryText.innerHTML = '';
+
+            // 生成小标签
+            const indicationTag = document.createElement('span');
+            indicationTag.className = 'tag';
+            indicationTag.textContent = `适应症：待补充`;
+            tags.appendChild(indicationTag);
+
+            const insuranceTag = document.createElement('span');
+            insuranceTag.className = 'tag';
+            if (card["药学服务"].includes("医保药品")) {
+                insuranceTag.textContent = `医保药品`;
+            } else {
+                insuranceTag.textContent = `自费`;
+            }
+            tags.appendChild(insuranceTag);
+
+            const productNameTag = document.createElement('span');
+            productNameTag.className = 'tag';
+            productNameTag.textContent = `商品名：${card["药品名称"]}`;
+            tags.appendChild(productNameTag);
+
+            // 生成注意事项小结
+            const summary = `特殊人群用药：${card["特殊人群用药"]}；常见不良反应：${card["常见不良反应及处理方法"].split('。')[0]}...`;
+            summaryText.textContent = summary;
+
+            Object.entries(card).forEach(([key, value]) => {
+                details.innerHTML += `<p><strong>${key}：</strong>${value}</p>`;
+            });
+
+            modal.style.display = "block";
+
+            span.onclick = function () {
+                modal.style.display = "none";
+            }
+
+            window.onclick = function (event) {
+                if (event.target == modal) {
+                    modal.style.display = "none";
+                }
+            }
+        }
+    </script>
+</body>
+
+</html>    
