@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DOT 用药时长分析工具</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- SheetJS for Excel parsing -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <!-- Chart.js for visualization -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <!-- PapaParse for CSV parsing -->
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="header-content">
+                <div class="header-title">
+                    <span class="header-icon">💊</span>
+                    <div>
+                        <h1>DOT 用药时长分析工具</h1>
+                        <p class="subtitle">销售数据用药时长指标分析 · Duration of Treatment</p>
+                    </div>
+                </div>
+                <div class="header-badge" id="dataStatus">未加载数据</div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Step 1: Upload -->
+            <section class="card" id="uploadSection">
+                <div class="card-header">
+                    <span class="step-number">1</span>
+                    <h2>导入销售数据</h2>
+                </div>
+                <div class="card-body">
+                    <div class="upload-area" id="uploadArea">
+                        <div class="upload-icon">📁</div>
+                        <p class="upload-text">点击选择文件或拖拽文件到此处</p>
+                        <p class="upload-hint">支持 Excel (.xlsx, .xls) 和 CSV 格式</p>
+                        <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" hidden>
+                        <button class="btn btn-primary" id="selectFileBtn">选择文件</button>
+                    </div>
+                    <div class="upload-info" id="uploadInfo" style="display:none;">
+                        <div class="file-info-row">
+                            <span class="file-icon">✅</span>
+                            <span id="fileName" class="file-name"></span>
+                            <span id="fileStats" class="file-stats"></span>
+                            <button class="btn btn-sm btn-outline" id="changeFileBtn">更换文件</button>
+                        </div>
+                    </div>
+                    <!-- Field mapping -->
+                    <div class="field-mapping" id="fieldMapping" style="display:none;">
+                        <h3 class="mapping-title">字段映射（系统已自动识别，可手动调整）</h3>
+                        <div class="mapping-grid">
+                            <div class="mapping-item">
+                                <label>患者标识字段</label>
+                                <select id="patientField"></select>
+                            </div>
+                            <div class="mapping-item">
+                                <label>购药时间字段</label>
+                                <select id="dateField"></select>
+                            </div>
+                            <div class="mapping-item">
+                                <label>购药数量字段</label>
+                                <select id="quantityField"></select>
+                            </div>
+                            <div class="mapping-item">
+                                <label>患者姓名字段<small>（可选）</small></label>
+                                <select id="nameField"></select>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Step 2: Filter -->
+            <section class="card" id="filterSection" style="display:none;">
+                <div class="card-header">
+                    <span class="step-number">2</span>
+                    <h2>设置筛选时间段</h2>
+                </div>
+                <div class="card-body">
+                    <p class="filter-desc">
+                        选择需要分析的购药时间段。系统将筛选出该时间段内有购药记录的患者，
+                        并统计这些患者从<strong>首次购药</strong>至<strong>最新数据</strong>的全部购药总支数来计算 DOT。
+                    </p>
+                    <div class="filter-controls">
+                        <div class="filter-item">
+                            <label>起始月份</label>
+                            <select id="startMonth"></select>
+                        </div>
+                        <div class="filter-arrow">→</div>
+                        <div class="filter-item">
+                            <label>结束月份</label>
+                            <select id="endMonth"></select>
+                        </div>
+                        <button class="btn btn-primary" id="analyzeBtn">开始分析</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Step 3: Results -->
+            <section class="card" id="resultsSection" style="display:none;">
+                <div class="card-header">
+                    <span class="step-number">3</span>
+                    <h2>分析结果</h2>
+                </div>
+                <div class="card-body">
+                    <!-- Summary Cards -->
+                    <div class="summary-grid">
+                        <div class="summary-card summary-period">
+                            <div class="summary-icon">📅</div>
+                            <div class="summary-label">筛选时间段</div>
+                            <div class="summary-value" id="resultPeriod">-</div>
+                        </div>
+                        <div class="summary-card summary-patients">
+                            <div class="summary-icon">👥</div>
+                            <div class="summary-label">去重患者数</div>
+                            <div class="summary-value" id="resultPatients">-</div>
+                            <div class="summary-sub" id="resultPatientsSub"></div>
+                        </div>
+                        <div class="summary-card summary-quantity">
+                            <div class="summary-icon">💉</div>
+                            <div class="summary-label">累计购药总支数</div>
+                            <div class="summary-value" id="resultQuantity">-</div>
+                            <div class="summary-sub" id="resultQuantitySub"></div>
+                        </div>
+                        <div class="summary-card summary-dot highlight">
+                            <div class="summary-icon">📊</div>
+                            <div class="summary-label">DOT 值</div>
+                            <div class="summary-value dot-value" id="resultDot">-</div>
+                            <div class="summary-sub">累计总支数 ÷ 去重患者数</div>
+                        </div>
+                    </div>
+
+                    <!-- Charts -->
+                    <div class="charts-grid">
+                        <div class="chart-card">
+                            <h3 class="chart-title">月度购药趋势</h3>
+                            <div class="chart-wrapper">
+                                <canvas id="trendChart"></canvas>
+                            </div>
+                        </div>
+                        <div class="chart-card">
+                            <h3 class="chart-title">DOT 对比分析</h3>
+                            <div class="chart-wrapper">
+                                <canvas id="dotChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Patient Distribution -->
+                    <div class="chart-card full-width">
+                        <h3 class="chart-title">患者购药支数分布</h3>
+                        <div class="chart-wrapper">
+                            <canvas id="distChart"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Detail Table -->
+                    <div class="detail-section">
+                        <div class="detail-header">
+                            <h3 class="chart-title">患者明细数据</h3>
+                            <button class="btn btn-sm btn-outline" id="exportBtn">导出 CSV</button>
+                        </div>
+                        <div class="table-wrapper">
+                            <table class="data-table" id="detailTable">
+                                <thead>
+                                    <tr>
+                                        <th>序号</th>
+                                        <th>患者标识</th>
+                                        <th>患者姓名</th>
+                                        <th>首次购药时间</th>
+                                        <th>末次购药时间</th>
+                                        <th>购药总次数</th>
+                                        <th>购药总支数</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="detailTableBody"></tbody>
+                            </table>
+                        </div>
+                        <div class="pagination" id="pagination"></div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="app-footer">
+            <p>DOT 用药时长分析工具 · 数据仅在本地浏览器中处理，不会上传至服务器</p>
+        </footer>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="loading-spinner"></div>
+        <p class="loading-text" id="loadingText">正在处理数据...</p>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>
