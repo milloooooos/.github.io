@@ -1376,30 +1376,50 @@ else:
 
         excel_buf = BytesIO()
         with pd.ExcelWriter(excel_buf, engine='openpyxl') as writer:
+            # 【防御·关键】确保工作簿至少有一个可见 Sheet。
+            # 部分运行环境（openpyxl 在某些 pandas 版本下）创建工作簿时不带默认 Sheet；
+            # 若导出逻辑在创建任何 Sheet 之前抛出早期异常，save() 会先抛
+            # IndexError("At least one sheet must be visible") 把真实错误掩盖。
+            # 这里预先塞一个可见 Sheet，保证即使后续出错 save() 也能成功，
+            # 从而让【真实错误】冒泡出来（而不是被 IndexError 掩盖）。
+            if not getattr(writer.book, 'worksheets', []):
+                writer.book.create_sheet('Sheet1')
             from openpyxl.styles import Font, PatternFill, Alignment
 
-            sm = result['start_month']; em = result['end_month']
-            ad_local = st.session_state.analysis_data
-            ac_local = st.session_state.annual_comparison
+            sm = result.get('start_month'); em = result.get('end_month')
+            if not sm or not em:
+                st.error("⚠️ 当前分析结果缺少起止月份（通常因未识别到有效日期列）。请检查数据中的日期列后，重新运行分析，再导出 Excel。")
+                st.stop()
+            ad_local = st.session_state.get('analysis_data') or {}
+            ac_local = st.session_state.get('annual_comparison') or {}
 
             # ---- 计算实际日期范围 ----
             filtered_df_export2 = ad_local.get('filtered_df', pd.DataFrame())
             date_col_local = ad_local.get('date_col', None)
 
             def _fmt_date(d):
-                """将日期转为 YYYY年MM月DD日"""
-                if d is None:
+                """将日期转为 YYYY年MM月DD日（对 NaT/非法日期容错）"""
+                if d is None or (isinstance(d, float) and pd.isna(d)):
                     return '未知'
                 if isinstance(d, pd.Timestamp):
+                    if d is pd.NaT:
+                        return '未知'
                     return f"{d.year}年{d.month}月{d.day}日"
                 if hasattr(d, 'year'):
-                    return f"{d.year}年{d.month}月{d.day}日"
+                    try:
+                        return f"{d.year}年{d.month}月{d.day}日"
+                    except Exception:
+                        return '未知'
                 return str(d)
 
             if date_col_local and not filtered_df_export2.empty and date_col_local in filtered_df_export2.columns:
                 start_dt = filtered_df_export2[date_col_local].min()
                 end_dt = filtered_df_export2[date_col_local].max()
+                if pd.isna(start_dt) or pd.isna(end_dt):
+                    start_dt = end_dt = None  # 触发下方回退
             else:
+                start_dt = end_dt = None
+            if start_dt is None or end_dt is None:
                 # 回退：从月份key推算
                 sp = sm.split('-'); ep = em.split('-')
                 sy, sm2 = int(sp[0]), int(sp[1])
@@ -2062,6 +2082,9 @@ else:
             # ---- 透视表独立下载（仅包含透视汇总数据） ----
             excel_buf_pivot = BytesIO()
             with pd.ExcelWriter(excel_buf_pivot, engine='openpyxl') as writer_pivot:
+                # 【防御】透视工作簿同样保证至少一个可见Sheet，避免 IndexError 掩盖真实错误
+                if not getattr(writer_pivot.book, 'worksheets', []):
+                    writer_pivot.book.create_sheet('Sheet1')
                 # Sheet 1: 品种×药房透视汇总
                 csdf_local = ad_local.get('cross_summary_df', pd.DataFrame())
                 if not csdf_local.empty:
