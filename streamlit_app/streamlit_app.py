@@ -1881,6 +1881,15 @@ else:
                 })
                 return rows
 
+            # 工作表名清洗：Excel 不允许 \ / * ? : [ ] 等字符，且最长 31 字符
+            import re as _re_sheet
+            _ILLEGAL_SHEET_CHARS = _re_sheet.compile(r'[\\/*?:\[\]]')
+
+            def _safe_sheet_name(name, maxlen=31):
+                """去除 Excel 工作表名非法字符并截断到 maxlen（≤31）字符"""
+                cleaned = _ILLEGAL_SHEET_CHARS.sub('', str(name)).strip()
+                return (cleaned if cleaned else '药房')[:maxlen]
+
             pharm_list = sorted(pharm_monthly_data.keys())
             # 记录已用Sheet名，防止覆盖/拆分
             used_sheet_names = set()
@@ -1893,19 +1902,19 @@ else:
                 p_new = pharm_new_pat_month.get(ph_name, {})
                 p_months_sorted = sorted(p_m.keys())
 
-                # 药房名截断：取全名前15字符，不足则全取
-                safe_name = ph_name[:15] if len(ph_name) > 15 else ph_name
-                sheet_name = f"{safe_name}"[:31]
+                # 药房名清洗：去除 Excel 工作表名非法字符（\ / * ? : [ ]），否则 create_sheet 会抛错
+                raw_name = ph_name[:15] if len(ph_name) > 15 else ph_name
+                sheet_name = _safe_sheet_name(raw_name)
 
-                # 去重：如果Sheet名已存在，用全名试，仍冲突则加序号
+                # 去重：如果Sheet名已存在，用清洗后的全名试，仍冲突则加序号
                 if sheet_name in used_sheet_names:
-                    sheet_name = f"{ph_name}"[:30]
+                    sheet_name = _safe_sheet_name(ph_name)[:30]
                 if sheet_name in used_sheet_names:
                     cnt = 1
                     base = sheet_name[:28]
-                    while f"{base}_{cnt}" in used_sheet_names:
+                    while _safe_sheet_name(f"{base}_{cnt}") in used_sheet_names:
                         cnt += 1
-                    sheet_name = f"{base}_{cnt}"[:31]
+                    sheet_name = _safe_sheet_name(f"{base}_{cnt}")[:31]
                 used_sheet_names.add(sheet_name)
 
                 # 新建空Sheet，手工填入所有内容
@@ -2104,6 +2113,13 @@ else:
             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             use_container_width=True,
         )
+
+        # 兜底保障：保存前至少保留一个可见工作表，
+        # 避免 openpyxl 在 save 时抛 IndexError("At least one sheet must be visible")
+        # （该错误会掩盖真实的建表异常，导致难以定位）
+        if not any(getattr(ws, 'sheet_state', 'visible') == 'visible' for ws in writer.book.worksheets):
+            if writer.book.worksheets:
+                writer.book.worksheets[0].sheet_state = 'visible'
 
     # ==================== 数据预览 ====================
     if st.session_state.dot_result is None:
