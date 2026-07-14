@@ -894,6 +894,10 @@ else:
     if st.session_state.dot_result is not None:
         result = st.session_state.dot_result
         ad = st.session_state.analysis_data
+        # 提前提示：未识别到日期列时，导出 Excel 必然失败（避免用户等到导出才崩）
+        if not ad.get('date_col'):
+            st.warning("⚠️ 本次分析未识别到『购药时间』日期列：图表仍可正常查看，但【导出 Excel】会失败。"
+                       "请返回上方『字段配置』重新选择『购药时间 *』，再点击「运行分析」后导出。")
         details_df = ad['details_df']
         monthly_stats = ad['monthly_stats']
         new_patient_by_month = ad['new_patient_by_month']
@@ -1376,14 +1380,17 @@ else:
 
         excel_buf = BytesIO()
         with pd.ExcelWriter(excel_buf, engine='openpyxl') as writer:
-            # 【防御·关键】确保工作簿至少有一个可见 Sheet。
+            # 【防御·关键】确保工作簿至少有一个【可见】Sheet（覆盖「空工作簿」与「全部隐藏」两种情况）。
             # 部分运行环境（openpyxl 在某些 pandas 版本下）创建工作簿时不带默认 Sheet；
             # 若导出逻辑在创建任何 Sheet 之前抛出早期异常，save() 会先抛
             # IndexError("At least one sheet must be visible") 把真实错误掩盖。
-            # 这里预先塞一个可见 Sheet，保证即使后续出错 save() 也能成功，
-            # 从而让【真实错误】冒泡出来（而不是被 IndexError 掩盖）。
-            if not getattr(writer.book, 'worksheets', []):
-                writer.book.create_sheet('Sheet1')
+            # 预先保证有可见 Sheet，即使后续出错 save() 也能成功，从而让【真实错误】冒泡出来。
+            _wbs = getattr(writer.book, 'worksheets', [])
+            if not any(getattr(ws, 'sheet_state', 'visible') == 'visible' for ws in _wbs):
+                if _wbs:
+                    _wbs[0].sheet_state = 'visible'
+                else:
+                    writer.book.create_sheet('Sheet1')
             from openpyxl.styles import Font, PatternFill, Alignment
 
             sm = result.get('start_month'); em = result.get('end_month')
@@ -1392,10 +1399,13 @@ else:
                 st.stop()
             ad_local = st.session_state.get('analysis_data') or {}
             ac_local = st.session_state.get('annual_comparison') or {}
+            date_col_local = ad_local.get('date_col', None)
+            if not date_col_local:
+                st.error("⚠️ 未识别到『购药时间』日期列，无法生成带日期范围的 Excel。请返回上方『字段配置』选择『购药时间 *』后，重新运行分析，再导出。")
+                st.stop()
 
             # ---- 计算实际日期范围 ----
             filtered_df_export2 = ad_local.get('filtered_df', pd.DataFrame())
-            date_col_local = ad_local.get('date_col', None)
 
             def _fmt_date(d):
                 """将日期转为 YYYY年MM月DD日（对 NaT/非法日期容错）"""
@@ -2082,9 +2092,13 @@ else:
             # ---- 透视表独立下载（仅包含透视汇总数据） ----
             excel_buf_pivot = BytesIO()
             with pd.ExcelWriter(excel_buf_pivot, engine='openpyxl') as writer_pivot:
-                # 【防御】透视工作簿同样保证至少一个可见Sheet，避免 IndexError 掩盖真实错误
-                if not getattr(writer_pivot.book, 'worksheets', []):
-                    writer_pivot.book.create_sheet('Sheet1')
+                # 【防御】透视工作簿同样保证至少一个【可见】Sheet，避免 IndexError 掩盖真实错误
+                _pwbs = getattr(writer_pivot.book, 'worksheets', [])
+                if not any(getattr(ws, 'sheet_state', 'visible') == 'visible' for ws in _pwbs):
+                    if _pwbs:
+                        _pwbs[0].sheet_state = 'visible'
+                    else:
+                        writer_pivot.book.create_sheet('Sheet1')
                 # Sheet 1: 品种×药房透视汇总
                 csdf_local = ad_local.get('cross_summary_df', pd.DataFrame())
                 if not csdf_local.empty:
@@ -2143,6 +2157,8 @@ else:
         if not any(getattr(ws, 'sheet_state', 'visible') == 'visible' for ws in writer.book.worksheets):
             if writer.book.worksheets:
                 writer.book.worksheets[0].sheet_state = 'visible'
+            else:
+                writer.book.create_sheet('Sheet1')
 
     # ==================== 数据预览 ====================
     if st.session_state.dot_result is None:
