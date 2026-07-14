@@ -1423,10 +1423,17 @@ else:
                 return str(d)
 
             if date_col_local and not filtered_df_export2.empty and date_col_local in filtered_df_export2.columns:
-                start_dt = filtered_df_export2[date_col_local].min()
-                end_dt = filtered_df_export2[date_col_local].max()
-                if pd.isna(start_dt) or pd.isna(end_dt):
-                    start_dt = end_dt = None  # 触发下方回退
+                try:
+                    # 关键：先把日期列安全转为 datetime64 再取最值。
+                    # 否则当该列为 object（字符串/混合类型，如部分 Timestamp + 部分 None/字符串）
+                    # 时，Series.min() 会抛 TypeError（umr_minimum 无法比较）。
+                    _dt_series = pd.to_datetime(filtered_df_export2[date_col_local], errors='coerce')
+                    start_dt = _dt_series.min()
+                    end_dt = _dt_series.max()
+                except Exception:
+                    start_dt = end_dt = None
+                if start_dt is None or end_dt is None or pd.isna(start_dt) or pd.isna(end_dt):
+                    start_dt = end_dt = None  # 触发下方回退（按月份key推算）
             else:
                 start_dt = end_dt = None
             if start_dt is None or end_dt is None:
