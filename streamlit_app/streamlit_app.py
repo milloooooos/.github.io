@@ -286,49 +286,35 @@ def calculate_dropout_data(patient_data, start_month, end_month):
             '占比(%)': round(cnt / len(dropout) * 100, 2) if dropout else 0,
         })
 
-    # ==================== 每月滚动脱落率趋势（新增脱落） ====================
-    # 先计算每个月的"存量"脱落集合（即按原始公式，患者到该月为止处于脱落状态）；
-    # 然后每月新增脱落 = 当月存量 - 上月存量，避免同一患者被连续多个月重复计数。
-    # 对回顾月份 M：
-    #   近两月    = [M-1, M]
-    #   倒推两月前 = 分析时间段中 <= M-2 的月份
-    #   当月分母  = 在"倒推两月前"有购药的患者
-    #   当月存量脱落 = 分母中在近两月未购药的患者
-    #   当月新增脱落 = 当月存量脱落 - 上月存量脱落
-    #   当月脱落率   = 当月新增脱落 / 当月分母 × 100%
-    stock_drop_by_month = {}
-    monthly_denom_by_month = {}
-    for i, cur_m in enumerate(period_months):
-        cur_recent = [cur_m]
-        pm = prev_month(cur_m)
-        if pm and pm in period_months:
-            cur_recent.append(pm)
-        cur_prior = [m for m in period_months[:i] if m not in cur_recent]
-        if not cur_prior:
-            continue  # 前两个月没有"倒推两月前"，跳过
-        cur_denom = set(pid for pid, months in patient_months_in_period.items()
-                        if any(m in cur_prior for m in months))
-        cur_drop = set(pid for pid in cur_denom
-                       if not any(m in cur_recent for m in patient_months_in_period[pid]))
-        stock_drop_by_month[cur_m] = cur_drop
-        monthly_denom_by_month[cur_m] = cur_denom
-
+    # ==================== 每月滚动脱落率趋势（新增脱落 / 基准月 T-2） ====================
+    # 对回顾月份 M：基准月 T-2 = M 的前两个月
+    #   分母   = 仅在基准月 T-2 有购药的患者（当月活跃基准人群，单月）
+    #   脱落   = 分母中在 T-1、T（即 M-1、M）都未购药的患者（即当月新增脱落）
+    #   脱落率 = 脱落 / 分母 × 100%
+    # 说明：分母只取基准月 T-2 单月，不是"T-2 及更早"的累计；由于分母随 M 前移，
+    #       同一患者只在「首次满足脱落条件」的那个月（即其最后一次购药月 +2）被计数一次，天然即为"新增"语义。
     trend_rows = []
-    for idx, cur_m in enumerate(period_months):
-        if cur_m not in stock_drop_by_month:
+    for i, cur_m in enumerate(period_months):
+        baseline = prev_month(prev_month(cur_m))  # T-2
+        if baseline is None or baseline not in period_months:
+            continue  # 基准月不在分析时间段内（最早两个月无法回顾），跳过
+        # 分母：仅在基准月 T-2 有购药的患者
+        cur_denom = set(pid for pid, months in patient_months_in_period.items()
+                        if baseline in months)
+        if not cur_denom:
             continue
-        prev_stock = set()
-        if idx > 0:
-            prev_m = period_months[idx - 1]
-            if prev_m in stock_drop_by_month:
-                prev_stock = stock_drop_by_month[prev_m]
-        new_drop = stock_drop_by_month[cur_m] - prev_stock
-        cur_denom = monthly_denom_by_month[cur_m]
-        cur_rate = (len(new_drop) / len(cur_denom) * 100) if cur_denom else 0.0
+        # 脱落：分母中在 M-1、M 都未购药的患者
+        recent = {cur_m}
+        pm = prev_month(cur_m)
+        if pm:
+            recent.add(pm)
+        cur_drop = set(pid for pid in cur_denom
+                       if not any(m in recent for m in patient_months_in_period[pid]))
+        cur_rate = len(cur_drop) / len(cur_denom) * 100
         trend_rows.append({
             '回顾月份': get_month_label(cur_m),
             '_month_key': cur_m,
-            '脱落人数': len(new_drop),
+            '脱落人数': len(cur_drop),
             '分母人数': len(cur_denom),
             '脱落率(%)': round(cur_rate, 2),
         })
@@ -1383,7 +1369,7 @@ else:
 
             # ---- 每月滚动脱落率趋势（新增脱落） ----
             st.subheader("每月新增脱落率趋势（滚动回顾）")
-            st.caption("每月柱子/折线表示的是该月**新增**脱落的患者人数（即患者首次满足脱落条件的那个月），不是持续未购药的累计人数。对每个回顾月份 M：分母 = 在 M-2 及更早有购药的患者；当月新增脱落 = 分母中在 M-1、M 都未购药、且上月尚未被计为脱落的患者；脱落率 = 当月新增脱落 / 分母。时间段最早的两个月无法回顾，不显示。")
+            st.caption("每月柱子/折线表示该月**新增**脱落人数（即患者首次满足脱落条件的那个月），不是持续未购药的累计人数。对回顾月份 M（基准月 T-2 = M 的前两个月）：分母 = 仅在基准月 T-2 有购药的患者；脱落 = 分母中在 T-1、T（即 M-1、M）都未购药的患者；脱落率 = 脱落 / 分母。时间段最早的两个月无法回顾，不显示。")
             trend_df = dropout_data.get('monthly_trend', pd.DataFrame())
             if trend_df is not None and not trend_df.empty:
                 fig_trend = make_subplots(specs=[[{"secondary_y": True}]])
