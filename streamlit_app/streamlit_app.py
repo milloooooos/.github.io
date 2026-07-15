@@ -225,7 +225,16 @@ def calculate_dropout_data(patient_data, start_month, end_month):
                 'reason': '分析时间段不足两个月，无法计算脱落率（需至少两个完整月份）',
                 'dropout_rate': None, 'dropout_count': 0, 'denominator_count': 0,
                 'recent_months': recent_months, 'prior_months': prior_months,
-                'dropout_patients': pd.DataFrame(), 'dropout_distribution': pd.DataFrame()}
+                'dropout_patients': pd.DataFrame(), 'dropout_distribution': pd.DataFrame(),
+                'monthly_trend': pd.DataFrame(),
+                'repurchase_data': {
+                    'can_compute': False,
+                    'reason': '分析时间段不足两个月，无法计算复购率（需至少两个完整月份）',
+                    'repurchase_rate': None, 'repurchase_count': 0, 'denominator_count': 0,
+                    'recent_months': recent_months, 'prior_months': prior_months,
+                    'repurchase_patients': pd.DataFrame(), 'repurchase_distribution': pd.DataFrame(),
+                    'monthly_trend': pd.DataFrame(),
+                }}
 
     # 计算每个患者在分析时间段内购药的月份集合
     patient_months_in_period = {}
@@ -320,6 +329,97 @@ def calculate_dropout_data(patient_data, start_month, end_month):
         })
     monthly_trend_df = pd.DataFrame(trend_rows)
 
+    # ==================== 复购率计算（与脱落率公式对称） ====================
+    # 复购率 = (倒推两个月前购药患者 ∩ 近两月购药患者) / 倒推两个月前购药患者总人数
+    # 复购：分母中在「近两月」至少购药一次的患者
+    repurchase = set(pid for pid in denominator
+                     if any(m in recent_months for m in patient_months_in_period[pid]))
+    repurchase_rate = (len(repurchase) / len(denominator) * 100) if denominator else 0.0
+
+    # 构建复购患者明细
+    repurchase_rows = []
+    for pid in repurchase:
+        p = patient_data[pid]
+        period_records = [r for r in p.get('records', [])
+                          if start_month <= get_month_key(r.get('date')) <= end_month]
+        if not period_records:
+            continue
+        total_qty = sum(r.get('qty', 0) for r in period_records)
+        last_date = max(r.get('date') for r in period_records)
+        first_date = min(r.get('date') for r in period_records)
+        last_date_str = last_date.strftime('%Y-%m-%d') if last_date else '-'
+        first_date_str = first_date.strftime('%Y-%m-%d') if first_date else '-'
+        repurchase_rows.append({
+            '患者标识': pid,
+            '患者姓名': p.get('name') or '-',
+            '首次购药时间': first_date_str,
+            '末次购药时间': last_date_str,
+            '累计购药支数': round(total_qty, 2),
+        })
+    repurchase_df = pd.DataFrame(repurchase_rows)
+    if not repurchase_df.empty:
+        repurchase_df = repurchase_df.sort_values('累计购药支数', ascending=False).reset_index(drop=True)
+        repurchase_df.insert(0, '序号', range(1, len(repurchase_df) + 1))
+
+    # 复购患者支数分布
+    repurchase_bucket_data = []
+    for label, lo, hi in buckets:
+        if not repurchase_df.empty:
+            cnt = len(repurchase_df[(repurchase_df['累计购药支数'] >= lo) & (repurchase_df['累计购药支数'] <= hi)])
+        else:
+            cnt = 0
+        repurchase_bucket_data.append({
+            '购药支数区间': label,
+            '患者人数': cnt,
+            '占比(%)': round(cnt / len(repurchase) * 100, 2) if repurchase else 0,
+        })
+    repurchase_distribution_df = pd.DataFrame(repurchase_bucket_data)
+
+    # 每月滚动复购率趋势（新增复购 / 基准月 T-2）
+    # 对回顾月份 M：分母 = 仅在基准月 T-2 有购药的患者
+    #   先计算每个月的"存量复购"（T-2 买了，且在 T-1 或 T 买了）
+    #   当月新增复购 = 当月存量复购 - 上月存量复购，避免同一患者被连续多月重复计数
+    #   复购率 = 当月新增复购 / 分母 × 100%
+    stock_repurchase_by_month = {}
+    denom_by_month_rp = {}
+    for i, cur_m in enumerate(period_months):
+        baseline = prev_month(prev_month(cur_m))  # T-2
+        if baseline is None or baseline not in period_months:
+            continue
+        cur_denom = set(pid for pid, months in patient_months_in_period.items()
+                        if baseline in months)
+        if not cur_denom:
+            continue
+        recent = {cur_m}
+        pm = prev_month(cur_m)
+        if pm:
+            recent.add(pm)
+        cur_repurchase = set(pid for pid in cur_denom
+                             if any(m in recent for m in patient_months_in_period[pid]))
+        stock_repurchase_by_month[cur_m] = cur_repurchase
+        denom_by_month_rp[cur_m] = cur_denom
+
+    repurchase_trend_rows = []
+    for idx, cur_m in enumerate(period_months):
+        if cur_m not in stock_repurchase_by_month:
+            continue
+        prev_stock = set()
+        if idx > 0:
+            prev_m = period_months[idx - 1]
+            if prev_m in stock_repurchase_by_month:
+                prev_stock = stock_repurchase_by_month[prev_m]
+        new_repurchase = stock_repurchase_by_month[cur_m] - prev_stock
+        cur_denom = denom_by_month_rp[cur_m]
+        cur_rate = len(new_repurchase) / len(cur_denom) * 100
+        repurchase_trend_rows.append({
+            '回顾月份': get_month_label(cur_m),
+            '_month_key': cur_m,
+            '复购人数': len(new_repurchase),
+            '分母人数': len(cur_denom),
+            '复购率(%)': round(cur_rate, 2),
+        })
+    repurchase_monthly_trend_df = pd.DataFrame(repurchase_trend_rows)
+
     return {
         'can_compute': True,
         'reason': '',
@@ -331,6 +431,18 @@ def calculate_dropout_data(patient_data, start_month, end_month):
         'dropout_patients': dropout_df,
         'dropout_distribution': pd.DataFrame(bucket_data),
         'monthly_trend': monthly_trend_df,
+        'repurchase_data': {
+            'can_compute': True,
+            'reason': '',
+            'repurchase_rate': round(repurchase_rate, 2),
+            'repurchase_count': len(repurchase),
+            'denominator_count': len(denominator),
+            'recent_months': recent_months,
+            'prior_months': prior_months,
+            'repurchase_patients': repurchase_df,
+            'repurchase_distribution': repurchase_distribution_df,
+            'monthly_trend': repurchase_monthly_trend_df,
+        },
     }
 
 
@@ -1053,6 +1165,14 @@ else:
                             patient_data, start_month, end_month
                         )
                         st.session_state.analysis_data['dropout_data'] = dropout_data
+                        st.session_state.analysis_data['repurchase_data'] = dropout_data.get('repurchase_data', {
+                            'can_compute': False,
+                            'reason': '无法计算',
+                            'repurchase_rate': None, 'repurchase_count': 0, 'denominator_count': 0,
+                            'recent_months': [], 'prior_months': [],
+                            'repurchase_patients': pd.DataFrame(), 'repurchase_distribution': pd.DataFrame(),
+                            'monthly_trend': pd.DataFrame(),
+                        })
 
     # ==================== 结果展示 ====================
     if st.session_state.dot_result is not None:
@@ -1403,6 +1523,123 @@ else:
             else:
                 st.info("分析时间段不足，无法生成每月脱落率趋势（至少需要 3 个月）。")
 
+        # ==================== 复购率分析 ====================
+        st.markdown("---")
+        st.header("📈 复购率分析")
+
+        repurchase_data = ad.get('repurchase_data', None)
+
+        if repurchase_data is None:
+            st.info("未获取到复购率数据，请重新点击「开始分析」。")
+        elif not repurchase_data.get('can_compute'):
+            st.warning(f"⚠️ {repurchase_data.get('reason', '无法计算复购率')}")
+        else:
+            recent_label_rp = "、".join(get_month_label(m) for m in repurchase_data['recent_months'])
+            prior_label_rp = "、".join(get_month_label(m) for m in repurchase_data['prior_months'])
+
+            st.markdown(f"""
+            <div class="def-box" style="font-size:0.82rem;">
+            <strong>复购率定义：</strong>在 <strong>{prior_label_rp}</strong> 有购药记录的患者中，后续 <strong>{recent_label_rp}</strong> 再次购药的患者占比。<br/>
+            公式：复购率 = 复购患者数 / 倒推两个月前购药患者总人数 × 100%
+            </div>
+            """, unsafe_allow_html=True)
+
+            # 指标卡片
+            rc1, rc2, rc3 = st.columns(3)
+            with rc1:
+                st.markdown(f"""
+                <div class="metric-card green">
+                    <div class="label">复购率</div>
+                    <div class="value">{repurchase_data['repurchase_rate']:.2f}%</div>
+                    <div class="sub">{prior_label_rp} 购药且 {recent_label_rp} 再次购药</div>
+                </div>
+                """, unsafe_allow_html=True)
+            with rc2:
+                st.markdown(f"""
+                <div class="metric-card teal">
+                    <div class="label">复购患者数</div>
+                    <div class="value">{repurchase_data['repurchase_count']:,}</div>
+                    <div class="sub">近两个月再次购药</div>
+                </div>
+                """, unsafe_allow_html=True)
+            with rc3:
+                st.markdown(f"""
+                <div class="metric-card blue">
+                    <div class="label">倒推两个月前购药患者</div>
+                    <div class="value">{repurchase_data['denominator_count']:,}</div>
+                    <div class="sub">作为分母</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # 名单 + 分布
+            rcol1, rcol2 = st.columns(2)
+
+            with rcol1:
+                st.subheader("复购患者名单")
+                rdf = repurchase_data['repurchase_patients']
+                if not rdf.empty:
+                    st.dataframe(rdf, use_container_width=True, hide_index=True,
+                                 column_config={'序号': st.column_config.NumberColumn(width='small'),
+                                                '累计购药支数': st.column_config.NumberColumn(format='%.2f')})
+                else:
+                    st.info("没有符合复购定义的患者")
+
+            with rcol2:
+                st.subheader("复购患者购药支数分布")
+                rdist_df = repurchase_data['repurchase_distribution']
+                if not rdist_df.empty and rdist_df['患者人数'].sum() > 0:
+                    fig_repurchase = go.Figure()
+                    fig_repurchase.add_trace(go.Bar(
+                        y=list(rdist_df['购药支数区间']), x=list(rdist_df['患者人数']), orientation='h',
+                        marker_color=['#16a34a', '#22c55e', '#14b8a6', '#0ea5e9', '#6366f1', '#8b5cf6', '#64748b'],
+                        text=[f"{c}人 ({r:.1f}%)" for c, r in zip(rdist_df['患者人数'], rdist_df['占比(%)'])],
+                        textposition='outside',
+                        hovertemplate='<b>%{y}</b><br>患者人数: %{x}<extra></extra>',
+                    ))
+                    fig_repurchase.update_layout(
+                        height=350, xaxis=dict(title="患者人数", rangemode='tozero'),
+                        yaxis=dict(title=""), margin=dict(l=20, r=90, t=25, b=20), showlegend=False
+                    )
+                    st.plotly_chart(fig_repurchase, use_container_width=True)
+                else:
+                    st.info("没有分布数据")
+
+            # ---- 每月滚动复购率趋势 ----
+            st.subheader("每月复购率趋势（滚动回顾）")
+            st.caption("每月柱子/折线表示该月**新增**复购患者人数（即患者在基准月 T-2 购药，且在 T-1、T 中首次再次购药的月份）。对回顾月份 M（基准月 T-2 = M 的前两个月）：分母 = 仅在基准月 T-2 有购药的患者；复购 = 分母中在 T-1、T（即 M-1、M）至少购药一次的患者；复购率 = 复购 / 分母。时间段最早的两个月无法回顾，不显示。")
+            rtrend_df = repurchase_data.get('monthly_trend', pd.DataFrame())
+            if rtrend_df is not None and not rtrend_df.empty:
+                fig_rtrend = make_subplots(specs=[[{"secondary_y": True}]])
+                fig_rtrend.add_trace(go.Bar(
+                    x=list(rtrend_df['回顾月份']), y=list(rtrend_df['复购人数']),
+                    name='复购人数', marker_color='#22c55e',
+                    text=list(rtrend_df['复购人数']), textposition='outside',
+                    hovertemplate='<b>%{x}</b><br>复购人数: %{y}<extra></extra>',
+                ), secondary_y=False)
+                fig_rtrend.add_trace(go.Scatter(
+                    x=list(rtrend_df['回顾月份']), y=list(rtrend_df['复购率(%)']),
+                    name='复购率(%)', mode='lines+markers+text',
+                    line=dict(color='#16a34a', width=3), marker=dict(size=8),
+                    text=[f"{v:.1f}%" for v in rtrend_df['复购率(%)']], textposition='top center',
+                    hovertemplate='<b>%{x}</b><br>复购率: %{y:.2f}%<extra></extra>',
+                ), secondary_y=True)
+                fig_rtrend.update_layout(
+                    height=420, hovermode='x unified',
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                    margin=dict(l=20, r=20, t=40, b=20),
+                )
+                fig_rtrend.update_yaxes(title_text="复购人数", secondary_y=False, rangemode='tozero')
+                fig_rtrend.update_yaxes(title_text="复购率 (%)", secondary_y=True, rangemode='tozero')
+                st.plotly_chart(fig_rtrend, use_container_width=True)
+                with st.expander("查看每月复购率明细表", expanded=False):
+                    st.dataframe(
+                        rtrend_df[['回顾月份', '复购人数', '分母人数', '复购率(%)']],
+                        use_container_width=True, hide_index=True,
+                        column_config={'复购率(%)': st.column_config.NumberColumn(format='%.2f')}
+                    )
+            else:
+                st.info("分析时间段不足，无法生成每月复购率趋势（至少需要 3 个月）。")
+
         # ==================== 图表区域 ====================
         st.markdown("---")
         st.header("📈 数据可视化")
@@ -1646,10 +1883,10 @@ else:
         <div class="def-box">
         <strong>📥 第一大按钮：导出完整分析报告</strong><br/><br/>
         <strong>📋 Sheet 1 — 汇总：</strong>原始底表数据 + 左右并排的药房DOT表和品种×药房透视汇总<br/><br/>
-        <strong>📊 Sheet 2-12 — 全局汇总维度：</strong><br/>
-        &nbsp;&nbsp;• 分析摘要、月度趋势、月度DOT对比、活跃vs新患、患者分布、年度DOT对比、<strong>脱落率分析</strong>、品种/药房/患者明细<br/>
+        <strong>📊 Sheet 2-13 — 全局汇总维度：</strong><br/>
+        &nbsp;&nbsp;• 分析摘要、月度趋势、月度DOT对比、活跃vs新患、患者分布、年度DOT对比、<strong>脱落率分析</strong>、<strong>复购率分析</strong>、品种/药房/患者明细<br/>
         &nbsp;&nbsp;• <em>每个Sheet标题行上方标注数据计算时间段（格式：YYYY年MM月DD日～YYYY年MM月DD日）</em><br/><br/>
-        <strong>🏪 Sheet 13+ — 分药房维度（合并版）：</strong><br/>
+        <strong>🏪 Sheet 14+ — 分药房维度（合并版）：</strong><br/>
         &nbsp;&nbsp;• 每个药房一个Sheet，包含5大分析维度（月度趋势 / DOT对比 / 活跃vs新患 / 患者分布 / 年度DOT）<br/>
         &nbsp;&nbsp;• 各维度以<span style='background:#FFD700;padding:0 4px;'>黄色标题</span>分隔，视觉清晰，Sheet数量大幅减少<br/>
         &nbsp;&nbsp;• <em>同一药房所有数据100%在同一Sheet中，杜绝拆分</em><br/><br/>
@@ -2143,7 +2380,88 @@ else:
                 add_time_header(ws_dropout, 1)
 
             # ============================================================
-            # Sheet 9: 品种汇总
+            # Sheet 9: 复购率分析
+            # ============================================================
+            repurchase_data_local = ad_local.get('repurchase_data', None)
+            if repurchase_data_local and repurchase_data_local.get('can_compute'):
+                recent_label_rp_local = "、".join(get_month_label(m) for m in repurchase_data_local['recent_months'])
+                prior_label_rp_local = "、".join(get_month_label(m) for m in repurchase_data_local['prior_months'])
+                repurchase_summary_rows = [
+                    ['项目', '数值'],
+                    ['复购率定义', f'在 {prior_label_rp_local} 有购药记录的患者中，后续 {recent_label_rp_local} 再次购药的患者占比'],
+                    ['复购率(%)', repurchase_data_local['repurchase_rate']],
+                    ['复购患者数', repurchase_data_local['repurchase_count']],
+                    ['倒推两个月前购药患者数（分母）', repurchase_data_local['denominator_count']],
+                    ['近两月份', recent_label_rp_local],
+                    ['倒推两个月前月份', prior_label_rp_local],
+                ]
+                repurchase_summary_df = pd.DataFrame(repurchase_summary_rows[1:], columns=repurchase_summary_rows[0])
+                repurchase_summary_df.to_excel(writer, sheet_name='复购率分析', index=False)
+                ws_repurchase = writer.sheets['复购率分析']
+                ws_repurchase.column_dimensions['A'].width = 45
+                ws_repurchase.column_dimensions['B'].width = 25
+                add_time_header(ws_repurchase, 2)
+
+                # 复购患者名单
+                rrp = repurchase_data_local['repurchase_patients']
+                if not rrp.empty:
+                    start_row = 9
+                    c = ws_repurchase.cell(row=start_row, column=1, value='复购患者名单')
+                    c.font = Font(bold=True, size=11, color='1a3a5c')
+                    start_row += 1
+                    for ci, cn in enumerate(rrp.columns, 1):
+                        c = ws_repurchase.cell(row=start_row, column=ci, value=cn)
+                        c.font = header_font
+                        c.fill = header_fill
+                    start_row += 1
+                    for _, row in rrp.iterrows():
+                        for ci, cn in enumerate(rrp.columns, 1):
+                            ws_repurchase.cell(row=start_row, column=ci, value=row[cn])
+                        start_row += 1
+                    start_row += 1
+
+                    # 复购患者支数分布
+                    rrd = repurchase_data_local['repurchase_distribution']
+                    if not rrd.empty:
+                        c = ws_repurchase.cell(row=start_row, column=1, value='复购患者购药支数分布')
+                        c.font = Font(bold=True, size=11, color='1a3a5c')
+                        start_row += 1
+                        for ci, cn in enumerate(rrd.columns, 1):
+                            c = ws_repurchase.cell(row=start_row, column=ci, value=cn)
+                            c.font = header_font
+                            c.fill = header_fill
+                        start_row += 1
+                        for _, row in rrd.iterrows():
+                            for ci, cn in enumerate(rrd.columns, 1):
+                                ws_repurchase.cell(row=start_row, column=ci, value=row[cn])
+                            start_row += 1
+                        start_row += 1
+
+                    # 每月滚动复购率趋势
+                    rmtrend = repurchase_data_local.get('monthly_trend', pd.DataFrame())
+                    if rmtrend is not None and not rmtrend.empty:
+                        rmtrend_out = rmtrend[['回顾月份', '复购人数', '分母人数', '复购率(%)']]
+                        c = ws_repurchase.cell(row=start_row, column=1, value='每月复购率趋势（滚动回顾）')
+                        c.font = Font(bold=True, size=11, color='1a3a5c')
+                        start_row += 1
+                        for ci, cn in enumerate(rmtrend_out.columns, 1):
+                            c = ws_repurchase.cell(row=start_row, column=ci, value=cn)
+                            c.font = header_font
+                            c.fill = header_fill
+                        start_row += 1
+                        for _, row in rmtrend_out.iterrows():
+                            for ci, cn in enumerate(rmtrend_out.columns, 1):
+                                ws_repurchase.cell(row=start_row, column=ci, value=row[cn])
+                            start_row += 1
+            else:
+                rp_reason = (repurchase_data_local.get('reason') if repurchase_data_local else '无法计算') or '无法计算'
+                pd.DataFrame({'提示': [rp_reason]}).to_excel(writer, sheet_name='复购率分析', index=False)
+                ws_repurchase = writer.sheets['复购率分析']
+                ws_repurchase.column_dimensions['A'].width = 60
+                add_time_header(ws_repurchase, 1)
+
+            # ============================================================
+            # Sheet 10: 品种汇总
             # ============================================================
             psdf_export2 = ad_local.get('product_summary_df', pd.DataFrame())
             if not psdf_export2.empty:
@@ -2156,7 +2474,7 @@ else:
                 pd.DataFrame({'提示': ['未检测到品种字段或无数据']}).to_excel(writer, sheet_name='品种汇总', index=False)
 
             # ============================================================
-            # Sheet 10: 药房汇总
+            # Sheet 11: 药房汇总
             # ============================================================
             phsdf_export2 = ad_local.get('pharmacy_summary_df', pd.DataFrame())
             if not phsdf_export2.empty:
@@ -2169,7 +2487,7 @@ else:
                 pd.DataFrame({'提示': ['未检测到药房字段或无数据']}).to_excel(writer, sheet_name='药房汇总', index=False)
 
             # ============================================================
-            # Sheet 11: 品种×药房交叉汇总
+            # Sheet 12: 品种×药房交叉汇总
             # ============================================================
             csdf_export2 = ad_local.get('cross_summary_df', pd.DataFrame())
             if not csdf_export2.empty:
@@ -2182,7 +2500,7 @@ else:
                 pd.DataFrame({'提示': ['需要同时配置品种和药房字段']}).to_excel(writer, sheet_name='品种×药房汇总', index=False)
 
             # ============================================================
-            # Sheet 12: 患者明细
+            # Sheet 13: 患者明细
             # ============================================================
             details_df.to_excel(writer, sheet_name='患者明细', index=False)
             ws10 = writer.sheets['患者明细']
