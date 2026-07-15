@@ -144,6 +144,19 @@ def prev_month(mk):
     return f"{y}-{m:02d}"
 
 
+def next_month(mk):
+    """获取下一个月的 YYYY-MM"""
+    if not mk or '-' not in mk:
+        return None
+    parts = mk.split('-')
+    y, m = int(parts[0]), int(parts[1])
+    m += 1
+    if m > 12:
+        m = 1
+        y += 1
+    return f"{y}-{m:02d}"
+
+
 def find_column(cols, keywords):
     col_lower = {c: str(c).lower().strip() for c in cols}
     for kw in keywords:
@@ -192,7 +205,7 @@ def calculate_dropout_data(patient_data, start_month, end_month):
     - dropout_rate: 百分比（如 12.34）
     - dropout_count / denominator_count
     - recent_months / prior_months
-    - dropout_patients: DataFrame（序号、患者标识、患者姓名、末次购药时间、累计购药支数）
+    - dropout_patients: DataFrame（序号、患者标识、患者姓名、末次购药时间、脱落时间、累计购药支数；累计=患者全量购药）
     - dropout_distribution: DataFrame（区间、人数、占比）
     """
     if not start_month or not end_month:
@@ -256,22 +269,25 @@ def calculate_dropout_data(patient_data, start_month, end_month):
 
     dropout_rate = (len(dropout) / len(denominator) * 100) if denominator else 0.0
 
-    # 构建脱落患者明细
+    # 构建脱落患者明细（累计口径 = 患者全量记录，与首页患者明细/DOT 一致）
     dropout_rows = []
     for pid in dropout:
         p = patient_data[pid]
-        # 只统计分析时间段内的记录
-        period_records = [r for r in p.get('records', [])
-                          if start_month <= get_month_key(r.get('date')) <= end_month]
-        if not period_records:
+        all_records = p.get('records', [])
+        if not all_records:
             continue
-        total_qty = sum(r.get('qty', 0) for r in period_records)
-        last_date = max(r.get('date') for r in period_records)
+        # 累计购药支数：从首次到最新全部购药（全量累计）
+        total_qty = sum(r.get('qty', 0) for r in all_records)
+        last_date = max(r.get('date') for r in all_records)
         last_date_str = last_date.strftime('%Y-%m-%d') if last_date else '-'
+        # 脱落时间：末次购药月份的次月（即开始判定为脱落的月份）
+        dropout_month = next_month(get_month_key(last_date)) if last_date else ''
+        dropout_month_str = get_month_label(dropout_month) if dropout_month else '-'
         dropout_rows.append({
             '患者标识': pid,
             '患者姓名': p.get('name') or '-',
             '末次购药时间': last_date_str,
+            '脱落时间': dropout_month_str,
             '累计购药支数': round(total_qty, 2),
         })
 
@@ -336,24 +352,30 @@ def calculate_dropout_data(patient_data, start_month, end_month):
                      if any(m in recent_months for m in patient_months_in_period[pid]))
     repurchase_rate = (len(repurchase) / len(denominator) * 100) if denominator else 0.0
 
-    # 构建复购患者明细
+    # 构建复购患者明细（累计口径 = 患者全量记录，与首页患者明细/DOT 一致）
     repurchase_rows = []
     for pid in repurchase:
         p = patient_data[pid]
-        period_records = [r for r in p.get('records', [])
-                          if start_month <= get_month_key(r.get('date')) <= end_month]
-        if not period_records:
+        all_records = p.get('records', [])
+        if not all_records:
             continue
-        total_qty = sum(r.get('qty', 0) for r in period_records)
-        last_date = max(r.get('date') for r in period_records)
-        first_date = min(r.get('date') for r in period_records)
+        # 累计购药支数：从首次到最新全部购药（全量累计）
+        total_qty = sum(r.get('qty', 0) for r in all_records)
+        last_date = max(r.get('date') for r in all_records)
+        first_date = min(r.get('date') for r in all_records)
         last_date_str = last_date.strftime('%Y-%m-%d') if last_date else '-'
         first_date_str = first_date.strftime('%Y-%m-%d') if first_date else '-'
+        # 复购时间：在「近两月」内实际发生复购的月份（可能 1 或 2 个月）
+        recent_set = set(recent_months)
+        rep_months = sorted({get_month_key(r.get('date')) for r in all_records
+                             if get_month_key(r.get('date')) in recent_set})
+        rep_time_str = "、".join(get_month_label(m) for m in rep_months) if rep_months else '-'
         repurchase_rows.append({
             '患者标识': pid,
             '患者姓名': p.get('name') or '-',
             '首次购药时间': first_date_str,
             '末次购药时间': last_date_str,
+            '复购时间': rep_time_str,
             '累计购药支数': round(total_qty, 2),
         })
     repurchase_df = pd.DataFrame(repurchase_rows)
@@ -1450,6 +1472,7 @@ else:
                 if not ddf.empty:
                     st.dataframe(ddf, use_container_width=True, hide_index=True,
                                  column_config={'序号': st.column_config.NumberColumn(width='small'),
+                                                '脱落时间': st.column_config.TextColumn('脱落时间'),
                                                 '累计购药支数': st.column_config.NumberColumn(format='%.2f')})
                 else:
                     st.info("没有符合脱落定义的患者")
@@ -1567,6 +1590,7 @@ else:
                 if not rdf.empty:
                     st.dataframe(rdf, use_container_width=True, hide_index=True,
                                  column_config={'序号': st.column_config.NumberColumn(width='small'),
+                                                '复购时间': st.column_config.TextColumn('复购时间'),
                                                 '累计购药支数': st.column_config.NumberColumn(format='%.2f')})
                 else:
                     st.info("没有符合复购定义的患者")
