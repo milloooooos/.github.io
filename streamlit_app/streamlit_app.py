@@ -286,6 +286,36 @@ def calculate_dropout_data(patient_data, start_month, end_month):
             '占比(%)': round(cnt / len(dropout) * 100, 2) if dropout else 0,
         })
 
+    # ==================== 每月滚动脱落率趋势 ====================
+    # 对分析时间段内的每个"回顾月份 M"（需存在 M-2 及更早的月份）：
+    #   近两月    = [M-1, M]
+    #   倒推两月前 = 分析时间段中 <= M-2 的月份
+    #   当月分母  = 在"倒推两月前"有购药的患者
+    #   当月脱落  = 分母中在近两月未购药的患者
+    #   当月脱落率 = 当月脱落 / 当月分母 × 100%
+    trend_rows = []
+    for i, cur_m in enumerate(period_months):
+        cur_recent = [cur_m]
+        pm = prev_month(cur_m)
+        if pm and pm in period_months:
+            cur_recent.append(pm)
+        cur_prior = [m for m in period_months[:i] if m not in cur_recent]
+        if not cur_prior:
+            continue  # 没有"倒推两月前"，跳过（时间段最早的两个月无法回顾）
+        cur_denom = set(pid for pid, months in patient_months_in_period.items()
+                        if any(m in cur_prior for m in months))
+        cur_drop = set(pid for pid in cur_denom
+                       if not any(m in cur_recent for m in patient_months_in_period[pid]))
+        cur_rate = (len(cur_drop) / len(cur_denom) * 100) if cur_denom else 0.0
+        trend_rows.append({
+            '回顾月份': get_month_label(cur_m),
+            '_month_key': cur_m,
+            '脱落人数': len(cur_drop),
+            '分母人数': len(cur_denom),
+            '脱落率(%)': round(cur_rate, 2),
+        })
+    monthly_trend_df = pd.DataFrame(trend_rows)
+
     return {
         'can_compute': True,
         'reason': '',
@@ -296,6 +326,7 @@ def calculate_dropout_data(patient_data, start_month, end_month):
         'prior_months': prior_months,
         'dropout_patients': dropout_df,
         'dropout_distribution': pd.DataFrame(bucket_data),
+        'monthly_trend': monthly_trend_df,
     }
 
 
@@ -1332,6 +1363,42 @@ else:
                 else:
                     st.info("没有分布数据")
 
+            # ---- 每月滚动脱落率趋势 ----
+            st.subheader("每月脱落率趋势（滚动回顾）")
+            st.caption("对每个回顾月份 M：分母 = 在 M-2 及更早有购药的患者；脱落 = 分母中在 M-1、M 这两个月都未购药的患者；脱落率 = 脱落 / 分母。时间段最早的两个月无法回顾，不显示。")
+            trend_df = dropout_data.get('monthly_trend', pd.DataFrame())
+            if trend_df is not None and not trend_df.empty:
+                fig_trend = make_subplots(specs=[[{"secondary_y": True}]])
+                fig_trend.add_trace(go.Bar(
+                    x=list(trend_df['回顾月份']), y=list(trend_df['脱落人数']),
+                    name='脱落人数', marker_color='#f97316',
+                    text=list(trend_df['脱落人数']), textposition='outside',
+                    hovertemplate='<b>%{x}</b><br>脱落人数: %{y}<extra></extra>',
+                ), secondary_y=False)
+                fig_trend.add_trace(go.Scatter(
+                    x=list(trend_df['回顾月份']), y=list(trend_df['脱落率(%)']),
+                    name='脱落率(%)', mode='lines+markers+text',
+                    line=dict(color='#dc2626', width=3), marker=dict(size=8),
+                    text=[f"{v:.1f}%" for v in trend_df['脱落率(%)']], textposition='top center',
+                    hovertemplate='<b>%{x}</b><br>脱落率: %{y:.2f}%<extra></extra>',
+                ), secondary_y=True)
+                fig_trend.update_layout(
+                    height=420, hovermode='x unified',
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                    margin=dict(l=20, r=20, t=40, b=20),
+                )
+                fig_trend.update_yaxes(title_text="脱落人数", secondary_y=False, rangemode='tozero')
+                fig_trend.update_yaxes(title_text="脱落率 (%)", secondary_y=True, rangemode='tozero')
+                st.plotly_chart(fig_trend, use_container_width=True)
+                with st.expander("查看每月脱落率明细表", expanded=False):
+                    st.dataframe(
+                        trend_df[['回顾月份', '脱落人数', '分母人数', '脱落率(%)']],
+                        use_container_width=True, hide_index=True,
+                        column_config={'脱落率(%)': st.column_config.NumberColumn(format='%.2f')}
+                    )
+            else:
+                st.info("分析时间段不足，无法生成每月脱落率趋势（至少需要 3 个月）。")
+
         # ==================== 图表区域 ====================
         st.markdown("---")
         st.header("📈 数据可视化")
@@ -2044,6 +2111,24 @@ else:
                         start_row += 1
                         for _, row in ddd.iterrows():
                             for ci, cn in enumerate(ddd.columns, 1):
+                                ws_dropout.cell(row=start_row, column=ci, value=row[cn])
+                            start_row += 1
+                        start_row += 1
+
+                    # 每月滚动脱落率趋势
+                    mtrend = dropout_data_local.get('monthly_trend', pd.DataFrame())
+                    if mtrend is not None and not mtrend.empty:
+                        mtrend_out = mtrend[['回顾月份', '脱落人数', '分母人数', '脱落率(%)']]
+                        c = ws_dropout.cell(row=start_row, column=1, value='每月脱落率趋势（滚动回顾）')
+                        c.font = Font(bold=True, size=11, color='1a3a5c')
+                        start_row += 1
+                        for ci, cn in enumerate(mtrend_out.columns, 1):
+                            c = ws_dropout.cell(row=start_row, column=ci, value=cn)
+                            c.font = header_font
+                            c.fill = header_fill
+                        start_row += 1
+                        for _, row in mtrend_out.iterrows():
+                            for ci, cn in enumerate(mtrend_out.columns, 1):
                                 ws_dropout.cell(row=start_row, column=ci, value=row[cn])
                             start_row += 1
             else:
