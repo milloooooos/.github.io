@@ -375,13 +375,14 @@ def calculate_dropout_data(patient_data, start_month, end_month):
         })
     repurchase_distribution_df = pd.DataFrame(repurchase_bucket_data)
 
-    # 每月滚动复购率趋势（新增复购 / 基准月 T-2）
-    # 对回顾月份 M：分母 = 仅在基准月 T-2 有购药的患者
-    #   先计算每个月的"存量复购"（T-2 买了，且在 T-1 或 T 买了）
-    #   当月新增复购 = 当月存量复购 - 上月存量复购，避免同一患者被连续多月重复计数
-    #   复购率 = 当月新增复购 / 分母 × 100%
-    stock_repurchase_by_month = {}
-    denom_by_month_rp = {}
+    # 每月滚动复购率趋势（存量 / 基准月 T-2）
+    # 与每月脱落率趋势共用同一口径：对回顾月份 M，基准月 T-2 = M 的前两个月
+    #   分母   = 仅在基准月 T-2 有购药的患者（单月）
+    #   复购   = 分母中在 T-1、T（即 M-1、M）至少购药一次的患者（存量）
+    #   复购率 = 复购 / 分母 × 100%
+    # 说明：与脱落率共用同一分母，且“近两月是否购药”互为补集，
+    #       故 复购人数 + 脱落人数 = 分母人数，复购率 + 脱落率 = 100%（同一每月基准）。
+    repurchase_trend_rows = []
     for i, cur_m in enumerate(period_months):
         baseline = prev_month(prev_month(cur_m))  # T-2
         if baseline is None or baseline not in period_months:
@@ -396,25 +397,11 @@ def calculate_dropout_data(patient_data, start_month, end_month):
             recent.add(pm)
         cur_repurchase = set(pid for pid in cur_denom
                              if any(m in recent for m in patient_months_in_period[pid]))
-        stock_repurchase_by_month[cur_m] = cur_repurchase
-        denom_by_month_rp[cur_m] = cur_denom
-
-    repurchase_trend_rows = []
-    for idx, cur_m in enumerate(period_months):
-        if cur_m not in stock_repurchase_by_month:
-            continue
-        prev_stock = set()
-        if idx > 0:
-            prev_m = period_months[idx - 1]
-            if prev_m in stock_repurchase_by_month:
-                prev_stock = stock_repurchase_by_month[prev_m]
-        new_repurchase = stock_repurchase_by_month[cur_m] - prev_stock
-        cur_denom = denom_by_month_rp[cur_m]
-        cur_rate = len(new_repurchase) / len(cur_denom) * 100
+        cur_rate = len(cur_repurchase) / len(cur_denom) * 100
         repurchase_trend_rows.append({
             '回顾月份': get_month_label(cur_m),
             '_month_key': cur_m,
-            '复购人数': len(new_repurchase),
+            '复购人数': len(cur_repurchase),
             '分母人数': len(cur_denom),
             '复购率(%)': round(cur_rate, 2),
         })
@@ -1487,9 +1474,9 @@ else:
                 else:
                     st.info("没有分布数据")
 
-            # ---- 每月滚动脱落率趋势（新增脱落） ----
-            st.subheader("每月新增脱落率趋势（滚动回顾）")
-            st.caption("每月柱子/折线表示该月**新增**脱落人数（即患者首次满足脱落条件的那个月），不是持续未购药的累计人数。对回顾月份 M（基准月 T-2 = M 的前两个月）：分母 = 仅在基准月 T-2 有购药的患者；脱落 = 分母中在 T-1、T（即 M-1、M）都未购药的患者；脱落率 = 脱落 / 分母。时间段最早的两个月无法回顾，不显示。")
+            # ---- 每月滚动脱落率趋势（存量 / 与复购互补） ----
+            st.subheader("每月脱落率趋势（滚动回顾）")
+            st.caption("对回顾月份 M（基准月 T-2 = M 的前两个月）：分母 = 仅在基准月 T-2 有购药的患者（单月）；脱落 = 分母中在 T-1、T（即 M-1、M）都未购药的患者；脱落率 = 脱落 / 分母。**与下方复购率共用同一分母**，故每个月的「脱落人数 + 复购人数 = 分母人数」「脱落率 + 复购率 = 100%」。时间段最早的两个月无法回顾，不显示。")
             trend_df = dropout_data.get('monthly_trend', pd.DataFrame())
             if trend_df is not None and not trend_df.empty:
                 fig_trend = make_subplots(specs=[[{"secondary_y": True}]])
@@ -1604,9 +1591,9 @@ else:
                 else:
                     st.info("没有分布数据")
 
-            # ---- 每月滚动复购率趋势 ----
+            # ---- 每月滚动复购率趋势（存量 / 与脱落互补） ----
             st.subheader("每月复购率趋势（滚动回顾）")
-            st.caption("每月柱子/折线表示该月**新增**复购患者人数（即患者在基准月 T-2 购药，且在 T-1、T 中首次再次购药的月份）。对回顾月份 M（基准月 T-2 = M 的前两个月）：分母 = 仅在基准月 T-2 有购药的患者；复购 = 分母中在 T-1、T（即 M-1、M）至少购药一次的患者；复购率 = 复购 / 分母。时间段最早的两个月无法回顾，不显示。")
+            st.caption("对回顾月份 M（基准月 T-2 = M 的前两个月）：分母 = 仅在基准月 T-2 有购药的患者（单月）；复购 = 分母中在 T-1、T（即 M-1、M）至少购药一次的患者；复购率 = 复购 / 分母。**与上方脱落率共用同一分母**，故每个月的「复购人数 + 脱落人数 = 分母人数」「复购率 + 脱落率 = 100%」。时间段最早的两个月无法回顾，不显示。")
             rtrend_df = repurchase_data.get('monthly_trend', pd.DataFrame())
             if rtrend_df is not None and not rtrend_df.empty:
                 fig_rtrend = make_subplots(specs=[[{"secondary_y": True}]])
