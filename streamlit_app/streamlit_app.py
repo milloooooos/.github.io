@@ -176,6 +176,129 @@ def auto_detect_fields(columns):
     return field_map
 
 
+def calculate_dropout_data(patient_data, start_month, end_month):
+    """
+    计算脱落率相关数据。
+
+    定义（基于公式图片）：
+    - 分析时间段 [start_month, end_month]
+    - 近两月 = 结束月份及其前一个月
+    - 倒推两个月前 = 分析时间段中，除「近两月」以外的其他月份
+    - 脱落患者 = 在「倒推两个月前」有购药记录，但在「近两月」没有购药记录的患者
+    - 脱落率 = 脱落患者数 / 倒推两个月前购药患者总人数
+
+    返回字典包含：
+    - can_compute: 是否可计算
+    - dropout_rate: 百分比（如 12.34）
+    - dropout_count / denominator_count
+    - recent_months / prior_months
+    - dropout_patients: DataFrame（序号、患者标识、患者姓名、末次购药时间、累计购药支数）
+    - dropout_distribution: DataFrame（区间、人数、占比）
+    """
+    if not start_month or not end_month:
+        return {'can_compute': False, 'reason': '缺少起止月份', 'dropout_rate': None,
+                'dropout_count': 0, 'denominator_count': 0,
+                'recent_months': [], 'prior_months': [],
+                'dropout_patients': pd.DataFrame(), 'dropout_distribution': pd.DataFrame()}
+
+    # 近两月
+    recent_months = [end_month]
+    prev = prev_month(end_month)
+    if prev:
+        recent_months.append(prev)
+
+    # 分析时间段内所有月份
+    period_months = []
+    y, m = int(start_month.split('-')[0]), int(start_month.split('-')[1])
+    ey, em = int(end_month.split('-')[0]), int(end_month.split('-')[1])
+    while (y, m) <= (ey, em):
+        period_months.append(f"{y}-{m:02d}")
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+
+    prior_months = [m for m in period_months if m not in recent_months]
+
+    if not prior_months:
+        return {'can_compute': False,
+                'reason': '分析时间段不足两个月，无法计算脱落率（需至少两个完整月份）',
+                'dropout_rate': None, 'dropout_count': 0, 'denominator_count': 0,
+                'recent_months': recent_months, 'prior_months': prior_months,
+                'dropout_patients': pd.DataFrame(), 'dropout_distribution': pd.DataFrame()}
+
+    # 计算每个患者在分析时间段内购药的月份集合
+    patient_months_in_period = {}
+    for pid, p in patient_data.items():
+        months = set()
+        for r in p.get('records', []):
+            mk = get_month_key(r.get('date'))
+            if mk and start_month <= mk <= end_month:
+                months.add(mk)
+        patient_months_in_period[pid] = months
+
+    # 分母：在「倒推两个月前」有购药记录的患者
+    denominator = set(pid for pid, months in patient_months_in_period.items()
+                      if any(m in prior_months for m in months))
+
+    # 分子：分母中在「近两月」未购药的患者
+    dropout = set(pid for pid in denominator
+                  if not any(m in recent_months for m in patient_months_in_period[pid]))
+
+    dropout_rate = (len(dropout) / len(denominator) * 100) if denominator else 0.0
+
+    # 构建脱落患者明细
+    dropout_rows = []
+    for pid in dropout:
+        p = patient_data[pid]
+        # 只统计分析时间段内的记录
+        period_records = [r for r in p.get('records', [])
+                          if start_month <= get_month_key(r.get('date')) <= end_month]
+        if not period_records:
+            continue
+        total_qty = sum(r.get('qty', 0) for r in period_records)
+        last_date = max(r.get('date') for r in period_records)
+        last_date_str = last_date.strftime('%Y-%m-%d') if last_date else '-'
+        dropout_rows.append({
+            '患者标识': pid,
+            '患者姓名': p.get('name') or '-',
+            '末次购药时间': last_date_str,
+            '累计购药支数': round(total_qty, 2),
+        })
+
+    dropout_df = pd.DataFrame(dropout_rows)
+    if not dropout_df.empty:
+        dropout_df = dropout_df.sort_values('累计购药支数', ascending=False).reset_index(drop=True)
+        dropout_df.insert(0, '序号', range(1, len(dropout_df) + 1))
+
+    # 脱落患者支数分布（复用全局分布的桶）
+    buckets = [('1支', 1, 1), ('2-3支', 2, 3), ('4-6支', 4, 6),
+               ('7-12支', 7, 12), ('13-24支', 13, 24), ('25-36支', 25, 36), ('37支以上', 37, float('inf'))]
+    bucket_data = []
+    for label, lo, hi in buckets:
+        if not dropout_df.empty:
+            cnt = len(dropout_df[(dropout_df['累计购药支数'] >= lo) & (dropout_df['累计购药支数'] <= hi)])
+        else:
+            cnt = 0
+        bucket_data.append({
+            '购药支数区间': label,
+            '患者人数': cnt,
+            '占比(%)': round(cnt / len(dropout) * 100, 2) if dropout else 0,
+        })
+
+    return {
+        'can_compute': True,
+        'reason': '',
+        'dropout_rate': round(dropout_rate, 2),
+        'dropout_count': len(dropout),
+        'denominator_count': len(denominator),
+        'recent_months': recent_months,
+        'prior_months': prior_months,
+        'dropout_patients': dropout_df,
+        'dropout_distribution': pd.DataFrame(bucket_data),
+    }
+
+
 # ==================== 初始化 Session State ====================
 for key in [
     'raw_df', 'columns', 'field_map', 'available_months',
@@ -890,6 +1013,12 @@ else:
                             'qty_col': qty_col,
                         }
 
+                        # ---- 脱落率分析 ----
+                        dropout_data = calculate_dropout_data(
+                            patient_data, start_month, end_month
+                        )
+                        st.session_state.analysis_data['dropout_data'] = dropout_data
+
     # ==================== 结果展示 ====================
     if st.session_state.dot_result is not None:
         result = st.session_state.dot_result
@@ -1121,6 +1250,87 @@ else:
                 fig_rolling.update_yaxes(title_text="累计购药总支数", secondary_y=False)
                 fig_rolling.update_yaxes(title_text="DOT 值", secondary_y=True)
                 st.plotly_chart(fig_rolling, use_container_width=True)
+
+        # ==================== 脱落率分析 ====================
+        st.markdown("---")
+        st.header("📉 脱落率分析")
+
+        dropout_data = ad.get('dropout_data', None)
+
+        if dropout_data is None:
+            st.info("未获取到脱落率数据，请重新点击「开始分析」。")
+        elif not dropout_data.get('can_compute'):
+            st.warning(f"⚠️ {dropout_data.get('reason', '无法计算脱落率')}")
+        else:
+            recent_label = "、".join(get_month_label(m) for m in dropout_data['recent_months'])
+            prior_label = "、".join(get_month_label(m) for m in dropout_data['prior_months'])
+
+            st.markdown(f"""
+            <div class="def-box" style="font-size:0.82rem;">
+            <strong>脱落率定义：</strong>在 <strong>{prior_label}</strong> 有购药记录的患者中，后续 <strong>{recent_label}</strong> 未再购药的患者占比。<br/>
+            公式：脱落率 = 脱落患者数 / 倒推两个月前购药患者总人数 × 100%
+            </div>
+            """, unsafe_allow_html=True)
+
+            # 指标卡片
+            dc1, dc2, dc3 = st.columns(3)
+            with dc1:
+                st.markdown(f"""
+                <div class="metric-card red">
+                    <div class="label">脱落率</div>
+                    <div class="value">{dropout_data['dropout_rate']:.2f}%</div>
+                    <div class="sub">{prior_label} 购药但 {recent_label} 未购药</div>
+                </div>
+                """, unsafe_allow_html=True)
+            with dc2:
+                st.markdown(f"""
+                <div class="metric-card orange">
+                    <div class="label">脱落患者数</div>
+                    <div class="value">{dropout_data['dropout_count']:,}</div>
+                    <div class="sub">近两个月未购药</div>
+                </div>
+                """, unsafe_allow_html=True)
+            with dc3:
+                st.markdown(f"""
+                <div class="metric-card blue">
+                    <div class="label">倒推两个月前购药患者</div>
+                    <div class="value">{dropout_data['denominator_count']:,}</div>
+                    <div class="sub">作为分母</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # 名单 + 分布
+            dcol1, dcol2 = st.columns(2)
+
+            with dcol1:
+                st.subheader("脱落患者名单")
+                ddf = dropout_data['dropout_patients']
+                if not ddf.empty:
+                    st.dataframe(ddf, use_container_width=True, hide_index=True,
+                                 column_config={'序号': st.column_config.NumberColumn(width='small'),
+                                                '累计购药支数': st.column_config.NumberColumn(format='%.2f')})
+                else:
+                    st.info("没有符合脱落定义的患者")
+
+            with dcol2:
+                st.subheader("脱落患者购药支数分布")
+                dist_df = dropout_data['dropout_distribution']
+                if not dist_df.empty and dist_df['患者人数'].sum() > 0:
+                    fig_dropout = go.Figure()
+                    fig_dropout.add_trace(go.Bar(
+                        y=list(dist_df['购药支数区间']), x=list(dist_df['患者人数']), orientation='h',
+                        marker_color=['#2563eb', '#16a34a', '#ea580c', '#a855f7', '#ec4899', '#dc2626', '#64748b'],
+                        text=[f"{c}人 ({r:.1f}%)" for c, r in zip(dist_df['患者人数'], dist_df['占比(%)'])],
+                        textposition='outside',
+                        hovertemplate='<b>%{y}</b><br>患者人数: %{x}<extra></extra>',
+                    ))
+                    fig_dropout.update_layout(
+                        height=350, xaxis=dict(title="患者人数", rangemode='tozero'),
+                        yaxis=dict(title=""), margin=dict(l=20, r=90, t=25, b=20), showlegend=False
+                    )
+                    st.plotly_chart(fig_dropout, use_container_width=True)
+                else:
+                    st.info("没有分布数据")
 
         # ==================== 图表区域 ====================
         st.markdown("---")
@@ -1365,10 +1575,10 @@ else:
         <div class="def-box">
         <strong>📥 第一大按钮：导出完整分析报告</strong><br/><br/>
         <strong>📋 Sheet 1 — 汇总：</strong>原始底表数据 + 左右并排的药房DOT表和品种×药房透视汇总<br/><br/>
-        <strong>📊 Sheet 2-11 — 全局汇总维度：</strong><br/>
-        &nbsp;&nbsp;• 分析摘要、月度趋势、月度DOT对比、活跃vs新患、患者分布、年度DOT对比、品种/药房/患者明细<br/>
+        <strong>📊 Sheet 2-12 — 全局汇总维度：</strong><br/>
+        &nbsp;&nbsp;• 分析摘要、月度趋势、月度DOT对比、活跃vs新患、患者分布、年度DOT对比、<strong>脱落率分析</strong>、品种/药房/患者明细<br/>
         &nbsp;&nbsp;• <em>每个Sheet标题行上方标注数据计算时间段（格式：YYYY年MM月DD日～YYYY年MM月DD日）</em><br/><br/>
-        <strong>🏪 Sheet 12+ — 分药房维度（合并版）：</strong><br/>
+        <strong>🏪 Sheet 13+ — 分药房维度（合并版）：</strong><br/>
         &nbsp;&nbsp;• 每个药房一个Sheet，包含5大分析维度（月度趋势 / DOT对比 / 活跃vs新患 / 患者分布 / 年度DOT）<br/>
         &nbsp;&nbsp;• 各维度以<span style='background:#FFD700;padding:0 4px;'>黄色标题</span>分隔，视觉清晰，Sheet数量大幅减少<br/>
         &nbsp;&nbsp;• <em>同一药房所有数据100%在同一Sheet中，杜绝拆分</em><br/><br/>
@@ -1603,6 +1813,12 @@ else:
                  sum(len(new_patient_by_month.get(m, set())) for m in sorted(monthly_stats.keys()) if sm <= m <= em)],
                 ['累计购药总支数（活跃患者从首次到末次的全部购药）', result['total_quantity']],
                 ['DOT 值（= 总支数 / 活跃患者数）', result['dot_value']],
+                ['脱落率(%)（在「倒推两个月前」购药但「近两月」未购药的患者占比）',
+                 ad_local.get('dropout_data', {}).get('dropout_rate') if ad_local.get('dropout_data', {}).get('can_compute') else '无法计算'],
+                ['脱落患者数',
+                 ad_local.get('dropout_data', {}).get('dropout_count') if ad_local.get('dropout_data', {}).get('can_compute') else '无法计算'],
+                ['倒推两个月前购药患者数（分母）',
+                 ad_local.get('dropout_data', {}).get('denominator_count') if ad_local.get('dropout_data', {}).get('can_compute') else '无法计算'],
                 ['', ''],
                 ['三、指标说明', ''],
                 ['活跃患者数', '所选时间段内至少有 1 次购药记录的去重患者人数。统计范围为这些患者从首次购药到最新数据的全部记录。'],
@@ -1775,7 +1991,70 @@ else:
                 add_time_header(ws6, 10)
 
             # ============================================================
-            # Sheet 8: 品种汇总
+            # Sheet 8: 脱落率分析
+            # ============================================================
+            dropout_data_local = ad_local.get('dropout_data', None)
+            if dropout_data_local and dropout_data_local.get('can_compute'):
+                recent_label_local = "、".join(get_month_label(m) for m in dropout_data_local['recent_months'])
+                prior_label_local = "、".join(get_month_label(m) for m in dropout_data_local['prior_months'])
+                dropout_summary_rows = [
+                    ['项目', '数值'],
+                    ['脱落率定义', f'在 {prior_label_local} 有购药记录的患者中，后续 {recent_label_local} 未再购药的患者占比'],
+                    ['脱落率(%)', dropout_data_local['dropout_rate']],
+                    ['脱落患者数', dropout_data_local['dropout_count']],
+                    ['倒推两个月前购药患者数（分母）', dropout_data_local['denominator_count']],
+                    ['近两月份', recent_label_local],
+                    ['倒推两个月前月份', prior_label_local],
+                ]
+                dropout_summary_df = pd.DataFrame(dropout_summary_rows[1:], columns=dropout_summary_rows[0])
+                dropout_summary_df.to_excel(writer, sheet_name='脱落率分析', index=False)
+                ws_dropout = writer.sheets['脱落率分析']
+                ws_dropout.column_dimensions['A'].width = 45
+                ws_dropout.column_dimensions['B'].width = 25
+                add_time_header(ws_dropout, 2)
+
+                # 脱落患者名单
+                ddp = dropout_data_local['dropout_patients']
+                if not ddp.empty:
+                    start_row = 9
+                    c = ws_dropout.cell(row=start_row, column=1, value='脱落患者名单')
+                    c.font = Font(bold=True, size=11, color='1a3a5c')
+                    start_row += 1
+                    for ci, cn in enumerate(ddp.columns, 1):
+                        c = ws_dropout.cell(row=start_row, column=ci, value=cn)
+                        c.font = header_font
+                        c.fill = header_fill
+                    start_row += 1
+                    for _, row in ddp.iterrows():
+                        for ci, cn in enumerate(ddp.columns, 1):
+                            ws_dropout.cell(row=start_row, column=ci, value=row[cn])
+                        start_row += 1
+                    start_row += 1
+
+                    # 脱落患者支数分布
+                    ddd = dropout_data_local['dropout_distribution']
+                    if not ddd.empty:
+                        c = ws_dropout.cell(row=start_row, column=1, value='脱落患者购药支数分布')
+                        c.font = Font(bold=True, size=11, color='1a3a5c')
+                        start_row += 1
+                        for ci, cn in enumerate(ddd.columns, 1):
+                            c = ws_dropout.cell(row=start_row, column=ci, value=cn)
+                            c.font = header_font
+                            c.fill = header_fill
+                        start_row += 1
+                        for _, row in ddd.iterrows():
+                            for ci, cn in enumerate(ddd.columns, 1):
+                                ws_dropout.cell(row=start_row, column=ci, value=row[cn])
+                            start_row += 1
+            else:
+                reason = (dropout_data_local.get('reason') if dropout_data_local else '无法计算') or '无法计算'
+                pd.DataFrame({'提示': [reason]}).to_excel(writer, sheet_name='脱落率分析', index=False)
+                ws_dropout = writer.sheets['脱落率分析']
+                ws_dropout.column_dimensions['A'].width = 60
+                add_time_header(ws_dropout, 1)
+
+            # ============================================================
+            # Sheet 9: 品种汇总
             # ============================================================
             psdf_export2 = ad_local.get('product_summary_df', pd.DataFrame())
             if not psdf_export2.empty:
@@ -1788,7 +2067,7 @@ else:
                 pd.DataFrame({'提示': ['未检测到品种字段或无数据']}).to_excel(writer, sheet_name='品种汇总', index=False)
 
             # ============================================================
-            # Sheet 9: 药房汇总
+            # Sheet 10: 药房汇总
             # ============================================================
             phsdf_export2 = ad_local.get('pharmacy_summary_df', pd.DataFrame())
             if not phsdf_export2.empty:
@@ -1801,7 +2080,7 @@ else:
                 pd.DataFrame({'提示': ['未检测到药房字段或无数据']}).to_excel(writer, sheet_name='药房汇总', index=False)
 
             # ============================================================
-            # Sheet 10: 品种×药房交叉汇总
+            # Sheet 11: 品种×药房交叉汇总
             # ============================================================
             csdf_export2 = ad_local.get('cross_summary_df', pd.DataFrame())
             if not csdf_export2.empty:
@@ -1814,7 +2093,7 @@ else:
                 pd.DataFrame({'提示': ['需要同时配置品种和药房字段']}).to_excel(writer, sheet_name='品种×药房汇总', index=False)
 
             # ============================================================
-            # Sheet 11: 患者明细
+            # Sheet 12: 患者明细
             # ============================================================
             details_df.to_excel(writer, sheet_name='患者明细', index=False)
             ws10 = writer.sheets['患者明细']
